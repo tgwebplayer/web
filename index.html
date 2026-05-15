@@ -281,15 +281,23 @@
     }
   }
 
-  // Buffering UI — kısa duraklamalarda gözükmesin diye 300ms gecikme
+  // Buffering UI — sadece ilk açılışta kullanılır; video bir kez oynamaya
+  // başladıktan sonra Plyr'ın kendi göstergesine bırakırız (flash olmasın).
   let bufTimer = null;
+  let playbackStarted = false;
   function showBuffering() {
+    if (playbackStarted) return;
     clearTimeout(bufTimer);
-    bufTimer = setTimeout(() => $buffering.classList.add("show"), 300);
+    bufTimer = setTimeout(() => $buffering.classList.add("show"), 400);
   }
   function hideBuffering() {
     clearTimeout(bufTimer);
     $buffering.classList.remove("show");
+  }
+  function markPlaybackStarted() {
+    playbackStarted = true;
+    hideLoader();
+    hideBuffering();
   }
 
   // Stats overlay (i tuşu ile aç/kapa) — debug için kullanışlı
@@ -367,8 +375,10 @@
         hls.on(Hls.Events.FRAG_BUFFERED, hideBuffering);
 
         hls.on(Hls.Events.ERROR, (_e, data) => {
-          console.error("[hls]", data.type, data.details, data.fatal);
-          if (data.fatal) attemptRecover(data);
+          if (data.fatal) {
+            console.error("[hls] FATAL", data.type, data.details);
+            attemptRecover(data);
+          }
         });
       } else {
         showError("Tarayıcınız HLS oynatmayı desteklemiyor. Güncel Chrome/Edge/Firefox kullanın.");
@@ -390,33 +400,34 @@
 
   plyr = new Plyr("#v", plyrOptions);
   plyr.on("waiting",  showBuffering);
-  plyr.on("playing",  hideBuffering);
+  plyr.on("playing",  markPlaybackStarted);
   plyr.on("canplay",  hideBuffering);
   plyr.on("seeking",  showBuffering);
   plyr.on("seeked",   hideBuffering);
   plyr.on("stalled",  showBuffering);
+  plyr.on("timeupdate", hideLoader);
 
   // Plyr "ready" event'ini beklemeden başlat — bazı tarayıcılarda fire olmuyor
   let started = false;
   function startOnce() {
     if (started) return;
     started = true;
-    console.log("[player] starting stream:", src);
     initStream(src);
   }
   plyr.on("ready", startOnce);
-  // Güvenlik ağı: Plyr ready 800ms içinde gelmezse zorla başlat
   setTimeout(startOnce, 800);
 
   // 25 sn içinde manifest gelmezse kullanıcıya hata göster
   setTimeout(() => {
-    if (!$loader.classList.contains("hide")) {
-      console.error("[player] timeout: stream did not start in 25s");
+    if (!playbackStarted && !$loader.classList.contains("hide")) {
       showError("Yayın yanıt vermiyor. Kaynak engellemiş olabilir (CORS / Referer).");
     }
   }, 25000);
 
-  $retry.addEventListener("click", () => { retryCount = 0; started = false; startOnce(); });
+  $retry.addEventListener("click", () => {
+    retryCount = 0; started = false; playbackStarted = false;
+    startOnce();
+  });
   window.addEventListener("beforeunload", destroyStream);
 })();
 </script>
