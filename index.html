@@ -139,6 +139,60 @@
   const $stats    = document.getElementById("stats");
   const $v        = document.getElementById("v");
 
+  // ===== Format tespiti =====
+  // Desteklenen tüm formatlar URL uzantısı veya ?type= ile tespit edilir.
+  const FORMAT_HLS    = "hls";      // .m3u8, .m3u
+  const FORMAT_DASH   = "dash";     // .mpd
+  const FORMAT_FLV    = "flv";      // .flv
+  const FORMAT_VIDEO  = "video";    // mp4, webm, ogv, mov, mkv, m4v, ts, avi, 3gp
+  const FORMAT_AUDIO  = "audio";    // mp3, m4a, aac, ogg, oga, flac, wav, opus
+  const FORMAT_YT     = "youtube";  // youtube.com / youtu.be
+  const FORMAT_VIMEO  = "vimeo";    // vimeo.com
+
+  const EXT_MIME = {
+    mp4:  "video/mp4",
+    m4v:  "video/mp4",
+    mov:  "video/mp4",
+    webm: "video/webm",
+    ogv:  "video/ogg",
+    ogg:  "video/ogg",
+    mkv:  "video/x-matroska",
+    ts:   "video/mp2t",
+    avi:  "video/x-msvideo",
+    "3gp": "video/3gpp",
+    // audio
+    mp3:  "audio/mpeg",
+    m4a:  "audio/mp4",
+    aac:  "audio/aac",
+    oga:  "audio/ogg",
+    flac: "audio/flac",
+    wav:  "audio/wav",
+    opus: "audio/ogg",
+  };
+  const AUDIO_EXTS = ["mp3", "m4a", "aac", "oga", "flac", "wav", "opus"];
+
+  function detectFormat(url, forced) {
+    if (forced) {
+      const f = forced.toLowerCase();
+      if (["hls", "m3u8"].includes(f)) return FORMAT_HLS;
+      if (["dash", "mpd"].includes(f)) return FORMAT_DASH;
+      if (f === "flv")                  return FORMAT_FLV;
+      if (f === "youtube")              return FORMAT_YT;
+      if (f === "vimeo")                return FORMAT_VIMEO;
+      if (f === "audio")                return FORMAT_AUDIO;
+      if (f === "video")                return FORMAT_VIDEO;
+    }
+    const lower = url.toLowerCase();
+    if (/youtube\.com\/watch|youtu\.be\//.test(lower))     return FORMAT_YT;
+    if (/vimeo\.com\//.test(lower))                         return FORMAT_VIMEO;
+    if (/\.m3u8?(\?|$)/.test(lower))                        return FORMAT_HLS;
+    if (/\.mpd(\?|$)/.test(lower))                          return FORMAT_DASH;
+    if (/\.flv(\?|$)/.test(lower))                          return FORMAT_FLV;
+    const ext = (lower.split("?")[0].split("#")[0].split(".").pop() || "");
+    if (AUDIO_EXTS.includes(ext))                           return FORMAT_AUDIO;
+    return FORMAT_VIDEO;
+  }
+
   function getSrc() {
     const p = new URLSearchParams(location.search);
     const v = p.get("v");
@@ -163,6 +217,10 @@
     return null;
   }
 
+  function getForcedType() {
+    return new URLSearchParams(location.search).get("type");
+  }
+
   function showLoader(text) {
     if (text) $loaderTx.textContent = text;
     $loader.classList.remove("hide");
@@ -174,6 +232,20 @@
     $error.classList.add("show");
   }
   function hideError() { $error.classList.remove("show"); }
+
+  // ===== Dinamik script yükleyici (lazy) =====
+  const _scriptCache = {};
+  function loadScript(src) {
+    if (_scriptCache[src]) return _scriptCache[src];
+    _scriptCache[src] = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src; s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("Yüklenemedi: " + src));
+      document.head.appendChild(s);
+    });
+    return _scriptCache[src];
+  }
 
   const src = getSrc();
   if (!src) {
@@ -201,76 +273,62 @@
     ],
     fullscreen: { enabled: true, fallback: true, iosNative: true },
     storage: { enabled: true, key: "wp_prefs" },
+    youtube: { noCookie: true, rel: 0, showinfo: 0, iv_load_policy: 3, modestbranding: 1 },
+    vimeo:   { byline: false, portrait: false, title: false, transparent: false },
   };
 
   let plyr = null;
   let hls  = null;
+  let dash = null;     // shaka.Player veya dashjs.MediaPlayer
+  let flv  = null;     // flv.js Player
   let retryCount = 0;
   const MAX_RETRIES = 5;
 
   // ---------- HLS.js — VOD optimize, uzun/büyük videolar için ----------
   const hlsConfig = {
-    enableWorker: true,                 // decoding ana thread'i takmaz
-
-    // Buffer — uzun film + yavaş ağ için kritik
+    enableWorker: true,
     maxBufferLength: 60,
-    maxMaxBufferLength: 600,            // ağ iyiyse 10 dk kadar önden buffer
-    maxBufferSize: 120 * 1024 * 1024,   // 120 MB
+    maxMaxBufferLength: 600,
+    maxBufferSize: 120 * 1024 * 1024,
     maxBufferHole: 0.5,
     highBufferWatchdogPeriod: 2,
     nudgeOffset: 0.1,
     nudgeMaxRetry: 5,
     backBufferLength: 90,
-
-    // ABR — bağlantıya göre otomatik kalite
     abrEwmaFastVoD: 3.0,
     abrEwmaSlowVoD: 9.0,
     abrEwmaDefaultEstimate: 1_000_000,
     abrBandWidthFactor: 0.95,
     abrBandWidthUpFactor: 0.7,
-    startLevel: -1,                     // otomatik başla
-    capLevelToPlayerSize: true,         // ekrandan büyük çözünürlük yükleme
+    startLevel: -1,
+    capLevelToPlayerSize: true,
     testBandwidth: true,
-
-    // VOD
     lowLatencyMode: false,
     progressive: false,
     startFragPrefetch: true,
-
-    // Retry / hata toleransı (manifest, level, fragment)
     manifestLoadingTimeOut: 15_000,
     manifestLoadingMaxRetry: 6,
     manifestLoadingRetryDelay: 500,
     manifestLoadingMaxRetryTimeout: 64_000,
-
     levelLoadingTimeOut: 15_000,
     levelLoadingMaxRetry: 6,
     levelLoadingRetryDelay: 500,
     levelLoadingMaxRetryTimeout: 64_000,
-
     fragLoadingTimeOut: 30_000,
     fragLoadingMaxRetry: 8,
     fragLoadingRetryDelay: 500,
     fragLoadingMaxRetryTimeout: 64_000,
-
     appendErrorMaxRetry: 5,
-
-    xhrSetup: function (xhr) {
-      try { xhr.withCredentials = false; } catch (e) {}
-    },
+    xhrSetup: function (xhr) { try { xhr.withCredentials = false; } catch (e) {} },
   };
 
   function attemptRecover(data) {
     if (!hls) return;
     if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-      console.warn("[hls] network error → startLoad");
       try { hls.startLoad(); } catch (e) {}
     } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-      console.warn("[hls] media error → recoverMediaError");
       try { hls.recoverMediaError(); }
-      catch (e) {
-        try { hls.swapAudioCodec(); hls.recoverMediaError(); } catch (e2) {}
-      }
+      catch (e) { try { hls.swapAudioCodec(); hls.recoverMediaError(); } catch (e2) {} }
     } else {
       retryCount++;
       if (retryCount <= MAX_RETRIES) {
@@ -281,8 +339,7 @@
     }
   }
 
-  // Buffering UI — sadece ilk açılışta kullanılır; video bir kez oynamaya
-  // başladıktan sonra Plyr'ın kendi göstergesine bırakırız (flash olmasın).
+  // Buffering UI
   let bufTimer = null;
   let playbackStarted = false;
   function showBuffering() {
@@ -300,17 +357,27 @@
     hideBuffering();
   }
 
-  // Stats overlay (i tuşu ile aç/kapa) — debug için kullanışlı
+  // Stats overlay
   let statsVisible = false;
   function updateStats() {
-    if (!statsVisible || !hls) return;
+    if (!statsVisible) return;
     try {
-      const lvl = hls.currentLevel >= 0 ? hls.levels[hls.currentLevel] : null;
-      const bw  = (hls.bandwidthEstimate / 1000).toFixed(0);
+      let info = "";
+      if (hls) {
+        const lvl = hls.currentLevel >= 0 ? hls.levels[hls.currentLevel] : null;
+        const bw  = (hls.bandwidthEstimate / 1000).toFixed(0);
+        const q   = lvl ? `${lvl.width}×${lvl.height} @ ${(lvl.bitrate/1000).toFixed(0)}kbps` : "auto";
+        info = `📊 HLS · ${q}<br/>BW ${bw} kbps`;
+      } else if (dash && dash.getVariantTracks) {
+        const tracks = dash.getVariantTracks() || [];
+        const active = tracks.find(t => t.active);
+        info = active ? `📊 DASH · ${active.width}×${active.height} @ ${(active.bandwidth/1000).toFixed(0)}kbps` : "📊 DASH";
+      } else {
+        info = `📊 ${($v.videoWidth||0)}×${($v.videoHeight||0)}`;
+      }
       const buf = $v.buffered.length
         ? ($v.buffered.end($v.buffered.length-1) - $v.currentTime).toFixed(1) : "0";
-      const q   = lvl ? `${lvl.width}×${lvl.height} @ ${(lvl.bitrate/1000).toFixed(0)}kbps` : "auto";
-      $stats.innerHTML = `📊 ${q}<br/>BW ${bw} kbps<br/>Buffer ${buf}s`;
+      $stats.innerHTML = `${info}<br/>Buffer ${buf}s`;
     } catch (e) {}
   }
   setInterval(updateStats, 1000);
@@ -321,7 +388,6 @@
       statsVisible = !statsVisible;
       $stats.classList.toggle("show", statsVisible);
     }
-    // YouTube-tarzı ek kısayollar
     if (!plyr) return;
     switch (e.key) {
       case "j": case "J": plyr.currentTime = Math.max(0, plyr.currentTime - 10); break;
@@ -336,7 +402,120 @@
 
   function destroyStream() {
     try { hls && hls.destroy(); } catch (e) {}
-    hls = null;
+    try { dash && dash.destroy && dash.destroy(); } catch (e) {}
+    try { flv && flv.destroy && flv.destroy(); } catch (e) {}
+    hls = dash = flv = null;
+  }
+
+  // ===== Format-spesifik başlatıcılar =====
+
+  function playHls(url) {
+    if ($v.canPlayType("application/vnd.apple.mpegurl")) {
+      plyr.source = { type: "video", sources: [{ src: url, type: "application/vnd.apple.mpegurl" }] };
+      $v.addEventListener("loadedmetadata", hideLoader, { once: true });
+      return;
+    }
+    if (window.Hls && Hls.isSupported()) {
+      hls = new Hls(hlsConfig);
+      hls.loadSource(url);
+      hls.attachMedia($v);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        retryCount = 0; hideLoader();
+        $v.play().catch(() => { $v.muted = true; $v.play().catch(() => {}); });
+      });
+      hls.on(Hls.Events.FRAG_BUFFERED, hideBuffering);
+      hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) attemptRecover(data); });
+    } else {
+      showError("Tarayıcınız HLS oynatmayı desteklemiyor.");
+    }
+  }
+
+  function playDash(url) {
+    showLoader("DASH motoru yükleniyor…");
+    // Shaka Player — en geniş codec ve DRM desteği
+    loadScript("https://cdn.jsdelivr.net/npm/shaka-player@4.7.10/dist/shaka-player.compiled.min.js")
+      .then(() => {
+        shaka.polyfill.installAll();
+        if (!shaka.Player.isBrowserSupported()) {
+          showError("Tarayıcınız DASH (.mpd) oynatmayı desteklemiyor.");
+          return;
+        }
+        dash = new shaka.Player($v);
+        dash.configure({
+          streaming: {
+            bufferingGoal: 60,
+            rebufferingGoal: 2,
+            bufferBehind: 60,
+            retryParameters: { maxAttempts: 6, baseDelay: 500, backoffFactor: 2 },
+          },
+          abr: { enabled: true },
+        });
+        dash.addEventListener("error", (e) => {
+          console.error("[shaka]", e.detail);
+          showError("DASH yayını açılamadı.");
+        });
+        return dash.load(url).then(() => {
+          hideLoader();
+          $v.play().catch(() => { $v.muted = true; $v.play().catch(() => {}); });
+        });
+      })
+      .catch(err => showError("DASH motoru yüklenemedi."));
+  }
+
+  function playFlv(url) {
+    showLoader("FLV motoru yükleniyor…");
+    loadScript("https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js")
+      .then(() => {
+        if (!flvjs.isSupported()) {
+          showError("Tarayıcınız FLV oynatmayı desteklemiyor.");
+          return;
+        }
+        flv = flvjs.createPlayer({ type: "flv", url: url, isLive: false, cors: true });
+        flv.attachMediaElement($v);
+        flv.on(flvjs.Events.ERROR, () => showError("FLV yayını açılamadı."));
+        flv.load();
+        hideLoader();
+        flv.play().catch(() => { $v.muted = true; flv.play().catch(() => {}); });
+      })
+      .catch(() => showError("FLV motoru yüklenemedi."));
+  }
+
+  function playProgressive(url, isAudio) {
+    const ext = (url.split("?")[0].split("#")[0].split(".").pop() || "mp4").toLowerCase();
+    const mime = EXT_MIME[ext] || (isAudio ? "audio/mpeg" : "video/mp4");
+    plyr.source = {
+      type: isAudio ? "audio" : "video",
+      sources: [{ src: url, type: mime }],
+    };
+    const onMeta = () => hideLoader();
+    const onErr  = () => {
+      // MKV/AVI gibi sorunlu container'lar için kullanıcıya net mesaj
+      const hint = (ext === "mkv" || ext === "avi")
+        ? "Bu video formatı (." + ext + ") tarayıcınız tarafından desteklenmiyor olabilir."
+        : "Video dosyası yüklenemedi.";
+      showError(hint);
+    };
+    $v.addEventListener("loadedmetadata", onMeta, { once: true });
+    $v.addEventListener("error", onErr, { once: true });
+  }
+
+  function playYouTube(url) {
+    // Plyr'ın YouTube provider'ı için video ID'sini çıkar
+    let id = null;
+    const m1 = url.match(/[?&]v=([^&#]+)/);
+    const m2 = url.match(/youtu\.be\/([^?&#]+)/);
+    const m3 = url.match(/youtube\.com\/embed\/([^?&#]+)/);
+    id = (m1 && m1[1]) || (m2 && m2[1]) || (m3 && m3[1]);
+    if (!id) { showError("YouTube video ID bulunamadı."); return; }
+    plyr.source = { type: "video", sources: [{ src: id, provider: "youtube" }] };
+    hideLoader();
+  }
+
+  function playVimeo(url) {
+    const m = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+    if (!m) { showError("Vimeo video ID bulunamadı."); return; }
+    plyr.source = { type: "video", sources: [{ src: m[1], provider: "vimeo" }] };
+    hideLoader();
   }
 
   function initStream(url) {
@@ -344,57 +523,18 @@
     hideError();
     showLoader("Bağlantı kuruluyor…");
 
-    const isHls = /\.m3u8(\?|$)/i.test(url);
+    const fmt = detectFormat(url, getForcedType());
+    console.log("[player] format:", fmt, "url:", url);
 
-    if (isHls) {
-      // Safari/iOS native HLS — Plyr source API
-      if ($v.canPlayType("application/vnd.apple.mpegurl")) {
-        plyr.source = {
-          type: "video",
-          sources: [{ src: url, type: "application/vnd.apple.mpegurl" }],
-        };
-        $v.addEventListener("loadedmetadata", () => hideLoader(), { once: true });
-        $v.addEventListener("error", () => showError("Video açılamadı."), { once: true });
-        return;
-      }
-      // HLS.js — direkt video elementine attach et
-      if (window.Hls && Hls.isSupported()) {
-        hls = new Hls(hlsConfig);
-        hls.loadSource(url);
-        hls.attachMedia($v);
-
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          retryCount = 0;
-          hideLoader();
-          $v.play().catch(() => {
-            $v.muted = true;
-            $v.play().catch(() => {});
-          });
-        });
-
-        hls.on(Hls.Events.FRAG_BUFFERED, hideBuffering);
-
-        hls.on(Hls.Events.ERROR, (_e, data) => {
-          if (data.fatal) {
-            console.error("[hls] FATAL", data.type, data.details);
-            attemptRecover(data);
-          }
-        });
-      } else {
-        showError("Tarayıcınız HLS oynatmayı desteklemiyor. Güncel Chrome/Edge/Firefox kullanın.");
-      }
-    } else {
-      // MP4 / WebM — Plyr source API
-      const ext = (url.split("?")[0].split(".").pop() || "mp4").toLowerCase();
-      const mime = ext === "webm" ? "video/webm" : ext === "ogv" ? "video/ogg" : "video/mp4";
-      plyr.source = {
-        type: "video",
-        sources: [{ src: url, type: mime }],
-      };
-      const onMeta = () => { hideLoader(); $v.removeEventListener("error", onErr); };
-      const onErr  = () => { showError("Video dosyası yüklenemedi."); $v.removeEventListener("loadedmetadata", onMeta); };
-      $v.addEventListener("loadedmetadata", onMeta, { once: true });
-      $v.addEventListener("error", onErr, { once: true });
+    switch (fmt) {
+      case FORMAT_HLS:    return playHls(url);
+      case FORMAT_DASH:   return playDash(url);
+      case FORMAT_FLV:    return playFlv(url);
+      case FORMAT_AUDIO:  return playProgressive(url, true);
+      case FORMAT_YT:     return playYouTube(url);
+      case FORMAT_VIMEO:  return playVimeo(url);
+      case FORMAT_VIDEO:
+      default:            return playProgressive(url, false);
     }
   }
 
@@ -407,7 +547,6 @@
   plyr.on("stalled",  showBuffering);
   plyr.on("timeupdate", hideLoader);
 
-  // Plyr "ready" event'ini beklemeden başlat — bazı tarayıcılarda fire olmuyor
   let started = false;
   function startOnce() {
     if (started) return;
@@ -417,7 +556,6 @@
   plyr.on("ready", startOnce);
   setTimeout(startOnce, 800);
 
-  // 25 sn içinde manifest gelmezse kullanıcıya hata göster
   setTimeout(() => {
     if (!playbackStarted && !$loader.classList.contains("hide")) {
       showError("Yayın yanıt vermiyor. Kaynak engellemiş olabilir (CORS / Referer).");
