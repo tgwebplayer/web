@@ -148,6 +148,18 @@
   const FORMAT_AUDIO  = "audio";    // mp3, m4a, aac, ogg, oga, flac, wav, opus
   const FORMAT_YT     = "youtube";  // youtube.com / youtu.be
   const FORMAT_VIMEO  = "vimeo";    // vimeo.com
+  const FORMAT_IFRAME = "iframe";   // 3rd-party embed: iframe.php / /embed/ / /player/
+
+  // Bilinen embed pattern'leri ve host ipuçları
+  const EMBED_URL_PATTERNS = [
+    "iframe.php", "/embed/", "/embed?", "/player/", "/play/", "/play?",
+    "/watch?", "playerjs", "vid.php", "stream.php"
+  ];
+  const EMBED_HOST_HINTS = [
+    "dplayer", "rapidvid", "rpdrm", "moly", "tau-video", "voe.sx",
+    "streamtape", "doodstream", "filemoon", "mixdrop", "fastream",
+    "vidoza", "uqload", "hxfile", "okru"
+  ];
 
   const EXT_MIME = {
     mp4:  "video/mp4",
@@ -181,6 +193,7 @@
       if (f === "vimeo")                return FORMAT_VIMEO;
       if (f === "audio")                return FORMAT_AUDIO;
       if (f === "video")                return FORMAT_VIDEO;
+      if (["iframe", "embed"].includes(f)) return FORMAT_IFRAME;
     }
     const lower = url.toLowerCase();
     if (/youtube\.com\/watch|youtu\.be\//.test(lower))     return FORMAT_YT;
@@ -190,6 +203,14 @@
     if (/\.flv(\?|$)/.test(lower))                          return FORMAT_FLV;
     const ext = (lower.split("?")[0].split("#")[0].split(".").pop() || "");
     if (AUDIO_EXTS.includes(ext))                           return FORMAT_AUDIO;
+    // Tanınmış medya uzantısı YOKSA ve embed pattern/host ipucu varsa → iframe
+    let host = "";
+    try { host = new URL(url).hostname.toLowerCase(); } catch (e) {}
+    if (EMBED_URL_PATTERNS.some(p => lower.indexOf(p) >= 0)) return FORMAT_IFRAME;
+    if (host && EMBED_HOST_HINTS.some(h => host.indexOf(h) >= 0)) return FORMAT_IFRAME;
+    // Uzantı yoksa (örn. /watch, /v/abc) — yine iframe varsay
+    const knownVideoExts = ["mp4","m4v","mov","webm","ogv","ogg","mkv","ts","avi","3gp",...AUDIO_EXTS];
+    if (!knownVideoExts.includes(ext)) return FORMAT_IFRAME;
     return FORMAT_VIDEO;
   }
 
@@ -518,6 +539,33 @@
     hideLoader();
   }
 
+  function playIframe(url) {
+    // 3rd party embed: tüm sayfayı kaplayan iframe — Plyr/video gizlenir.
+    // Kaynak host sadece iframe içinde görünür; üst frame ve adres çubuğu maskeli.
+    try {
+      const stage = document.getElementById("stage");
+      stage.innerHTML = "";
+      const f = document.createElement("iframe");
+      f.src = url;
+      f.allow = "autoplay; fullscreen; encrypted-media; picture-in-picture";
+      f.allowFullscreen = true;
+      f.setAttribute("allowfullscreen", "true");
+      f.setAttribute("webkitallowfullscreen", "true");
+      f.setAttribute("mozallowfullscreen", "true");
+      f.referrerPolicy = "no-referrer";
+      f.style.cssText = "position:fixed;inset:0;width:100%;height:100%;border:0;background:#000;";
+      stage.appendChild(f);
+      markPlaybackStarted();
+      // 30 sn içinde hiç yüklenmezse uyarı
+      setTimeout(() => {
+        if (!playbackStarted) showError("Embed yayın yanıt vermiyor.");
+      }, 30000);
+      f.addEventListener("load", markPlaybackStarted);
+    } catch (e) {
+      showError("Embed iframe oluşturulamadı.");
+    }
+  }
+
   function initStream(url) {
     destroyStream();
     hideError();
@@ -533,6 +581,7 @@
       case FORMAT_AUDIO:  return playProgressive(url, true);
       case FORMAT_YT:     return playYouTube(url);
       case FORMAT_VIMEO:  return playVimeo(url);
+      case FORMAT_IFRAME: return playIframe(url);
       case FORMAT_VIDEO:
       default:            return playProgressive(url, false);
     }
